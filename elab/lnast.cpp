@@ -219,6 +219,8 @@ void Lnast::sel2attr_set_get(const Lnast_nid &psts_nid, Lnast_nid &selc_nid) {
   }
 }
 
+
+
 void Lnast::merge_hierarchical_attr_set(Lnast_nid &selc_nid) {
   I(get_type(selc_nid).is_select());
   auto sibling_asg_nid = get_sibling_next(selc_nid);
