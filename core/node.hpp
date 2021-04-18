@@ -273,7 +273,8 @@ public:
   bool             is_type_flop() const;
   bool             is_type_tup() const;
   bool             is_type_io() const { return nid == Hardcoded_input_nid || nid == Hardcoded_output_nid; }
-  bool             is_type_loop_breaker() const;
+  bool             is_type_loop_first() const { return Ntype::is_loop_first(get_type_op()); }
+  bool             is_type_loop_last() const;
 
   Hierarchy_index hierarchy_go_down() const;
   Hierarchy_index hierarchy_go_up() const;
@@ -281,6 +282,7 @@ public:
   bool            is_root() const;
 
   void            set_type_sub(Lg_type_id subid);
+  void            set_type_const(const Lconst &val);
   Lg_type_id      get_type_sub() const;
   const Sub_node &get_type_sub_node() const;
   Sub_node *      ref_type_sub_node() const;
@@ -319,6 +321,9 @@ public:
   bool is_graph_output() const { return nid == Hardcoded_output_nid; }
 
   void del_node();
+
+  Node create(Ntype_op op) const; // create a new node, keep same hierarchy
+  Node create_const(const Lconst &value) const; // create a new node, keep same hierarchy
 
   // BEGIN ATTRIBUTE ACCESSORS
   std::string debug_name() const;

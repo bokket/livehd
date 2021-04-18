@@ -26,27 +26,51 @@ void Bitwidth::process_const(Node &node) {
 
 void Bitwidth::process_flop(Node &node) {
   I(node.is_sink_connected("din"));
-  auto d_dpin = node.get_sink_pin("din").get_driver_pin();
-  auto qpin   = node.get_driver_pin();
+  std::vector<Node_pin::Compact_flat> flop_cpins;
+
+  if (node.is_sink_connected("din")) {
+    flop_cpins.emplace_back(node.get_sink_pin("din").get_driver_pin().get_compact_flat());
+  }
+
+  flop_cpins.emplace_back(node.get_driver_pin().get_compact_flat());
+  if (node.is_sink_connected("initial")) {
+    flop_cpins.emplace_back(node.get_sink_pin("initial").get_driver_pin().get_compact_flat());
+  }
 
   Lconst max_val;
   Lconst min_val;
-  auto   it_d_dpin = flat_bwmap.find(d_dpin.get_compact_flat());
-  auto   it_qpin   = flat_bwmap.find(qpin.get_compact_flat());
-  if (it_d_dpin != flat_bwmap.end()) {
-    max_val = it_d_dpin->second.get_max();
-    min_val = it_d_dpin->second.get_min();
-    flat_bwmap.insert_or_assign(node.get_driver_pin().get_compact_flat(), Bitwidth_range(min_val, max_val));
-    return;
-  } else if (it_qpin != flat_bwmap.end()) {  // At least propagate backward the width
-    auto tmp_min = Lconst(it_qpin->second.min);
-    auto tmp_max = Lconst(it_qpin->second.max);
-    flat_bwmap.insert_or_assign(d_dpin.get_compact_flat(), Bitwidth_range(tmp_min, tmp_max));
-    return;
-  } else {
-    debug_unconstrained_msg(node, d_dpin);
+
+  bool a_constrain_found = false;
+  for(auto &cpin:flop_cpins) {
+    auto it = flat_bwmap.find(cpin);
+    if (it == flat_bwmap.end()) {
+      continue;
+    }
+    a_constrain_found = true;
+
+    auto a = it->second.get_max();
+    if (max_val<a) {
+      if (max_val!=0)
+        not_finished = true;
+
+      max_val = a;
+    }
+    auto b = it->second.get_max();
+    if (min_val>b) {
+      if (min_val!=0)
+        not_finished = true;
+      min_val = b;
+    }
+  }
+
+  if (a_constrain_found) {
+    for(auto &cpin:flop_cpins) {
+      flat_bwmap.insert_or_assign(cpin, Bitwidth_range(min_val, max_val));
+    }
+  }else{
+    auto dpin = node.setup_driver_pin();
+    debug_unconstrained_msg(node, dpin);
     not_finished = true;
-    return;
   }
 }
 
@@ -575,7 +599,7 @@ void Bitwidth::process_logic_and(Node &node, XEdge_iterator &inp_edges) {
     if (bw_bits)
       continue;  // only handle unconstrained inputs
 
-    if (e.driver.is_graph_io() || e.driver.get_node().is_type_loop_breaker())
+    if (e.driver.is_graph_io() || e.driver.get_node().is_type_loop_last())
       e.driver.set_bits(bw.get_sbits());
   }
 
@@ -585,7 +609,20 @@ void Bitwidth::process_logic_and(Node &node, XEdge_iterator &inp_edges) {
 }
 
 Bitwidth::Attr Bitwidth::get_key_attr(std::string_view key) {
-  auto sz = key.size();
+  // FIXME: code duplicated in Firmap. Create a separate class for Attr
+  const auto sz = key.size();
+
+  if (sz<5)
+    return Attr::Set_other;
+
+  if (key.substr(sz - 5, sz) == "__max")
+    return Attr::Set_max;
+
+  if (key.substr(sz - 5, sz) == "__min")
+    return Attr::Set_min;
+
+  if (sz<7)
+    return Attr::Set_other;
 
   if (key.substr(sz - 7, sz) == "__ubits")
     return Attr::Set_ubits;
@@ -593,11 +630,8 @@ Bitwidth::Attr Bitwidth::get_key_attr(std::string_view key) {
   if (key.substr(sz - 7, sz) == "__sbits")
     return Attr::Set_sbits;
 
-  if (key.substr(sz - 5, sz) == "__max")
-    return Attr::Set_max;
-
-  if (key.substr(sz - 5, sz) == "__min")
-    return Attr::Set_min;
+  if (sz<11)
+    return Attr::Set_other;
 
   if (key.substr(sz - 11, sz) == "__dp_assign")
     return Attr::Set_dp_assign;
@@ -608,9 +642,9 @@ Bitwidth::Attr Bitwidth::get_key_attr(std::string_view key) {
 void Bitwidth::process_attr_get(Node &node) {
   I(node.is_sink_connected("field"));
   auto dpin_key = node.get_sink_pin("field").get_driver_pin();
-  I(dpin_key.get_node().is_type(Ntype_op::TupKey));
+  I(dpin_key.get_node().is_type_const());
 
-  auto key  = dpin_key.get_name();
+  auto key  = dpin_key.get_type_const().to_string();
   auto attr = get_key_attr(key);
   I(attr != Attr::Set_dp_assign);  // Not get attr with __dp_assign
   if (attr == Attr::Set_other) {
@@ -644,90 +678,48 @@ void Bitwidth::process_attr_get(Node &node) {
     result = bw.get_min();
   }
 
-  auto new_node = node.get_class_lgraph()->create_node_const(result);
-  auto new_dpin = new_node.get_driver_pin();
-  for (auto &out : node.out_edges()) {
-    new_dpin.connect_sink(out.sink);
+  for(auto pin:node.inp_connected_pins()) {
+    pin.del();
   }
-
-  if (!hier)  // FIXME: once hier del works
-    node.del_node();
+  node.set_type_const(result);
 }
 
 // lhs := rhs
-void Bitwidth::process_attr_set_dp_assign(Node &node_dp, Fwd_edge_iterator::Fwd_iter &fwd_it) {
-  auto dpin_lhs = node_dp.get_sink_pin("value").get_driver_pin();
-  auto dpin_rhs = node_dp.get_sink_pin("name").get_driver_pin();
+void Bitwidth::process_attr_set_dp_assign(Node &node_dp) {
+  I(node_dp.is_sink_connected("value"));
+  I(node_dp.is_sink_connected("name"));
 
-  auto           it = flat_bwmap.find(dpin_lhs.get_compact_flat());
-  Bitwidth_range bw_lhs(0);
-  if (it != flat_bwmap.end()) {
-    bw_lhs = it->second;
-  } else {
+  auto dpin_lhs = node_dp.get_sink_pin("name").get_driver_pin();
+  auto dpin_rhs = node_dp.get_sink_pin("value").get_driver_pin();
+
+  auto it = flat_bwmap.find(dpin_lhs.get_compact_flat());
+  if (it == flat_bwmap.end()) {
 #ifndef NDEBUG
     fmt::print("BW-> LHS isn't ready, wait for next iteration\n");
 #endif
+    not_finished = true;
     return;
   }
 
-  auto           it2 = flat_bwmap.find(dpin_rhs.get_compact_flat());
-  Bitwidth_range bw_rhs(0);
-  if (it2 != flat_bwmap.end()) {
-    bw_rhs = it2->second;
-  } else {
+  for (auto out_dpin : node_dp.out_connected_pins()) {
+    flat_bwmap.insert_or_assign(out_dpin.get_compact_flat(), it->second);
+  }
+
+  auto it2 = flat_bwmap.find(dpin_rhs.get_compact_flat());
+  if (it2 == flat_bwmap.end()) {
 #ifndef NDEBUG
     fmt::print("BW-> RHS isn't ready, wait for next iteration\n");
 #endif
+    not_finished = true;
     return;
   }
-
-  bool lhs_is_attr_bit_set = false;
-#if 0
-  auto lhs_node = dpin_lhs.get_node();
-  // note: if lhs is attr_bit_set, the dp should respect it and create a mask to guarantee the will reflect the lhs bits
-  if (lhs_node.get_type_op() == Ntype_op::Get_mask) {
-    auto attr_node  = lhs_node.setup_sink_pin("a").get_driver_node();
-    auto attr_field = attr_node.setup_sink_pin("field").get_driver_pin().get_name();
-    lhs_is_attr_bit_set = attr_field == "__ubits" || attr_field == "__sbits";
-  }
-#endif
-
-  if (bw_rhs.get_sbits() >= bw_lhs.get_sbits() || lhs_is_attr_bit_set) {
-#if 0
-    auto sext_node  = node_dp.get_class_lgraph()->create_node(Ntype_op::Sext);
-#else
-    auto mask_node = node_dp.get_class_lgraph()->create_node(Ntype_op::And);
-    auto mask_dpin = mask_node.get_driver_pin();
-
-    auto bw_lhs_bits = bw_lhs.is_always_positive() ? bw_lhs.get_sbits() - 1 : bw_lhs.get_sbits();
-
-    auto mask_const   = (Lconst(1UL) << Lconst(bw_lhs_bits)) - 1;
-    auto all_one_node = node_dp.get_class_lgraph()->create_node_const(mask_const);
-    auto all_one_dpin = all_one_node.setup_driver_pin();
-
-    // Note: I set the unsigned k-bits (max, min) for the mask
-    flat_bwmap.insert_or_assign(mask_dpin.get_compact_flat(), Bitwidth_range(Lconst(0), mask_const));
-    dpin_rhs.connect_sink(mask_node.setup_sink_pin("A"));
-    all_one_dpin.connect_sink(mask_node.setup_sink_pin("A"));
-    for (auto e : node_dp.out_edges()) mask_dpin.connect_sink(e.sink);
-
-    fwd_it.add_node(mask_node);
-    fwd_it.add_node(all_one_node);
-#endif
-
-  } else {  // bw_rhs.bits < bw_lhs.bits, already match
-    for (auto e : node_dp.out_edges()) dpin_rhs.connect_sink(e.sink);
-  }
-
-  if (!hier)  // FIXME: once hier del works
-    node_dp.del_node();
 }
 
 void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd_iter &fwd_it) {
   I(node_attr.is_sink_connected("field"));
 
   auto dpin_key = node_attr.get_sink_pin("field").get_driver_pin();
-  auto key      = dpin_key.get_name();
+  auto key      = dpin_key.get_type_const().to_string();
   auto attr     = get_key_attr(key);
 
   if (attr == Attr::Set_other) {
@@ -736,19 +728,17 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
   }
 
   if (attr == Attr::Set_dp_assign) {
-    process_attr_set_dp_assign(node_attr, fwd_it);
+    process_attr_set_dp_assign(node_attr);
     return;
   }
 
   I(node_attr.is_sink_connected("value"));
   auto dpin_val = node_attr.get_sink_pin("value").get_driver_pin();
 
-  if (!dpin_key.get_node().is_type(Ntype_op::TupKey)) {
+  if (!dpin_key.get_node().is_type_const()) {
     not_finished = true;
     return;  // can not handle now
   }
-
-  I(dpin_key.has_name());
 
   auto attr_dpin = node_attr.get_driver_pin("Y");
 
@@ -758,15 +748,14 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
 
   // copy parent's bw for some judgement and then update to attr_set value
   Bitwidth_range bw(0);
-  bool           parent_pending = false;
+  bool           parent_pending = true;
 
   if (node_attr.is_sink_connected("name")) {
     auto through_dpin = node_attr.get_sink_pin("name").get_driver_pin();
     auto it           = flat_bwmap.find(through_dpin.get_compact_flat());
     if (it != flat_bwmap.end()) {
       bw = it->second;
-    } else {
-      parent_pending = true;
+      parent_pending = false;
     }
   }
 
@@ -782,7 +771,8 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
                     bw.get_sbits(),
                     val.to_i());
 
-      bw.set_ubits_range(val.to_i());
+      if (parent_pending)
+        bw.set_ubits_range(val.to_i());
       insert_tposs_nodes(node_attr, val.to_i(), fwd_it);
     } else {  // Attr::Set_sbits
       if (bw.get_sbits() > (val.to_i()))
@@ -792,7 +782,8 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
                     bw.get_sbits(),
                     val.to_i());
 
-      bw.set_sbits_range(val.to_i());
+      if (parent_pending)
+        bw.set_sbits_range(val.to_i());
     }
   } else if (attr == Attr::Set_max) {
     I(false);  // FIXME: todo
@@ -809,7 +800,7 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
   }
 
   // upwards propagate for one step node_attr, most graph input BW are handled here
-  if (parent_pending) {
+  if (parent_pending && node_attr.is_sink_connected("name")) {
     auto through_dpin = node_attr.get_sink_pin("name").get_driver_pin();
     flat_bwmap.insert_or_assign(through_dpin.get_compact_flat(), bw);
     // bw.dump();
@@ -818,7 +809,7 @@ void Bitwidth::process_attr_set_new_attr(Node &node_attr, Fwd_edge_iterator::Fwd
 
 // insert tposs after attr node when ubits
 void Bitwidth::insert_tposs_nodes(Node &node_attr_hier, Bits_t ubits, Fwd_edge_iterator::Fwd_iter &fwd_it) {
-  I(node_attr_hier.get_sink_pin("field").get_driver_pin().get_name().find("__ubits") != std::string::npos);
+  I(node_attr_hier.get_sink_pin("field").get_driver_pin().get_type_const().to_string().find("__ubits") != std::string::npos);
 
   auto node_attr = node_attr_hier.get_non_hierarchical();  // insert locally not through hierarchy
   auto name_dpin = node_attr.get_sink_pin("name").get_driver_pin();
@@ -908,10 +899,15 @@ void Bitwidth::process_attr_set_propagate(Node &node_attr) {
     }
   }
 
-  for (auto out_dpin : node_attr.out_connected_pins()) flat_bwmap.insert_or_assign(out_dpin.get_compact_flat(), parent_attr_bw);
+  // Do not pass the parent_attr_bw. data_bw is smaller (or failed), pass the smallest possible
 
-  if (parent_data_pending)
-    flat_bwmap.insert_or_assign(data_dpin.get_compact_flat(), parent_attr_bw);
+  for (auto out_dpin : node_attr.out_connected_pins()) {
+    flat_bwmap.insert_or_assign(out_dpin.get_compact_flat(), data_bw);
+  }
+
+  if (parent_data_pending) {
+    flat_bwmap.insert_or_assign(data_dpin.get_compact_flat(), data_bw);
+  }
 }
 
 void Bitwidth::process_attr_set(Node &node, Fwd_edge_iterator::Fwd_iter &fwd_it) {
@@ -1001,7 +997,7 @@ void Bitwidth::bw_pass(Lgraph *lg) {
       auto inp_edges = node.inp_edges();
       auto op        = node.get_type_op();
 
-      if (inp_edges.empty() && (op != Ntype_op::Const && op != Ntype_op::Sub && op != Ntype_op::LUT && op != Ntype_op::TupKey)) {
+      if (inp_edges.empty() && (op != Ntype_op::Const && op != Ntype_op::Sub && op != Ntype_op::LUT)) {
         if (!hier)  // FIXME: once hier del works
           node.del_node();
         continue;
@@ -1009,7 +1005,7 @@ void Bitwidth::bw_pass(Lgraph *lg) {
 
       if (op == Ntype_op::Const) {
         process_const(node);
-      } else if (op == Ntype_op::TupKey || op == Ntype_op::TupGet || op == Ntype_op::TupAdd) {
+      } else if (op == Ntype_op::TupGet || op == Ntype_op::TupAdd) {
         continue;  // Nothing to do for this
       } else if (op == Ntype_op::Or) {
         if (inp_edges.size() == 1)
@@ -1146,66 +1142,96 @@ void Bitwidth::bw_pass(Lgraph *lg) {
     }
   }
 
-  if (!not_finished) {
-    // FIXME: this code may need to move to cprop if we have several types of
-    // attributes. Delete only if all the attributes are finished
-
+  if (!hier && !not_finished) {
     // delete all the attr_set/get for bitwidth
-    for (auto node : lg->fast(hier)) {
+    for (auto node : lg->fast()) { // Non-hierarchical erase attr
       auto op = node.get_type_op();
       if (op == Ntype_op::AttrSet) {
-        try_delete_attr_node(node);
+        if (op == Ntype_op::AttrSet) {
+          try_delete_attr_node(node);
+        }
       }
-    }  // end of lg->fast()
+    }
   }
 
+#ifndef NDEBUG
   for (auto node : lg->fast(hier)) {
     for (auto dpin : node.out_connected_pins()) {
       auto it = flat_bwmap.find(dpin.get_compact_flat());
       if (it == flat_bwmap.end()) {
-#ifndef NDEBUG
         fmt::print("node:{} {} UNKNOWN\n", node.debug_name(), dpin.get_pin_name());
-#endif
       } else if (it->second.is_always_positive()) {
-#ifndef NDEBUG
         fmt::print("node:{} {} pos  |", node.debug_name(), dpin.get_pin_name());
         it->second.dump();
-#endif
       } else if (it->second.is_always_negative()) {
-#ifndef NDEBUG
         fmt::print("node:{} {} neg  |", node.debug_name(), dpin.get_pin_name());
         it->second.dump();
-#endif
       } else {
-#ifndef NDEBUG
         fmt::print("node:{} {} both |", node.debug_name(), dpin.get_pin_name());
         it->second.dump();
-#endif
       }
     }
   }
+#endif
 }
 
 void Bitwidth::try_delete_attr_node(Node &node) {
+  I(!hier);
+
+  Attr attr = Attr::Set_other;
   if (node.is_sink_connected("field")) {
     auto key_dpin = node.get_sink_pin("field").get_driver_pin();
-    auto attr     = get_key_attr(key_dpin.get_name());
+    attr     = get_key_attr(key_dpin.get_type_const().to_string());
     if (attr == Attr::Set_other)
       return;
   }
 
-  auto node_non_hier = node.get_non_hierarchical();
-  if (node_non_hier.is_sink_connected("name")) {
-    auto data_dpin = node_non_hier.get_sink_pin("name").get_driver_pin();
+  if (attr == Attr::Set_dp_assign) {
+    auto dpin_lhs = node.get_sink_pin("name").get_driver_pin();
+    auto dpin_rhs = node.get_sink_pin("value").get_driver_pin();
+    auto      it1 = flat_bwmap.find(dpin_lhs.get_compact_flat());
+    auto      it2 = flat_bwmap.find(dpin_rhs.get_compact_flat());
 
-    for (auto e : node_non_hier.out_edges()) {
-      if (e.driver.get_pid() == 0)
-        e.sink.connect_driver(data_dpin);
+    I(it1!=flat_bwmap.end());
+    I(it2!=flat_bwmap.end());
+
+    auto bw_lhs = it1->second;
+    auto bw_rhs = it2->second;
+
+    if (bw_rhs.get_sbits() >= bw_lhs.get_sbits()) {
+#if 0
+      auto sext_node  = node.get_class_lgraph()->create_node(Ntype_op::Sext);
+#else
+      auto mask_node = node.get_class_lgraph()->create_node(Ntype_op::And);
+      auto mask_dpin = mask_node.get_driver_pin();
+
+      auto bw_lhs_bits = bw_lhs.is_always_positive() ? bw_lhs.get_sbits() - 1 : bw_lhs.get_sbits();
+
+      auto mask_const   = (Lconst(1UL) << Lconst(bw_lhs_bits)) - 1;
+      auto all_one_node = node.get_class_lgraph()->create_node_const(mask_const);
+      auto all_one_dpin = all_one_node.setup_driver_pin();
+
+      // Note: I set the unsigned k-bits (max, min) for the mask
+      flat_bwmap.insert_or_assign(mask_dpin.get_compact_flat(), Bitwidth_range(Lconst(0), mask_const));
+      dpin_rhs.connect_sink(mask_node.setup_sink_pin("A"));
+      all_one_dpin.connect_sink(mask_node.setup_sink_pin("A"));
+      for (auto e : node.out_edges()) mask_dpin.connect_sink(e.sink);
+#endif
+      node.del_node();
+      return;
     }
   }
 
-  if (!hier)  // FIXME: once hier del works
-    node.del_node();
+  // auto node_non_hier = node.get_non_hierarchical();
+  if (node.is_sink_connected("name")) {
+    auto data_dpin = node.get_sink_pin("name").get_driver_pin();
+
+    for (auto e : node.out_edges()) {
+      if (e.driver.get_pid() == 0) // No chain pin
+        e.sink.connect_driver(data_dpin);
+    }
+  }
+  node.del_node();
 }
 
 void Bitwidth::set_subgraph_boundary_bw(Node &node) {

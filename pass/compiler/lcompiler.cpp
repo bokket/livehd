@@ -37,7 +37,7 @@ void Lcompiler::prp_thread_ln2lg(std::shared_ptr<Lnast> ln) {
   }
 
   // FIXME->sh: DEBUG: cannot separate to do_local_cprop_bitwidth(), why?
-  Cprop cp(false, false);                                     // hier = false, gioc = false
+  Cprop cp(false, false);                                        // hier = false, gioc = false
   Bitwidth bw(false, 10, global_flat_bwmap, global_hier_bwmap);  // hier = false, max_iters = 10
   for (const auto &lg : local_lgs) {
     thread_pool.add(&Lcompiler::prp_thread_local_cprop_bitwidth, this, lg, cp, bw);
@@ -164,18 +164,22 @@ void Lcompiler::do_cprop() {
   // hierarchical traversal
   for (auto &lg : lgs) {
     ++lgcnt;
-    // bottom up approach to parallelly analyze the firbits
+    // bottom up approach to parallelly do cprop
     if (lg->get_name() == top_name_before_mapping) {
       hit = true;
-      lg->each_hier_unique_sub_bottom_up([this, &cp](Lgraph *lg_sub) {
+      lg->each_hier_unique_sub_bottom_up_parallel([this, &cp](Lgraph *lg_sub) {
         fmt::print("---------------- Copy-Propagation ({}) ------------------- (C-0)\n", lg_sub->get_name());
         cp.do_trans(lg_sub);
+        // fmt::print("---------------- Copy-Propagation ({}) ------------------- (C-1)\n", lg_sub->get_name());
+        // cp.do_trans(lg_sub);
         gviz ? gv.do_from_lgraph(lg_sub, "local.cprop-ed") : void();
       });
 
       // for top lgraph
       fmt::print("---------------- Copy-Propagation ({}) ------------------- (C-0)\n", lg->get_name());
       cp.do_trans(lg);
+      // fmt::print("---------------- Copy-Propagation ({}) ------------------- (C-1)\n", lg->get_name());
+      // cp.do_trans(lg);
       gviz ? gv.do_from_lgraph(lg, "local.cprop-ed") : void();
     }
   }
@@ -214,6 +218,9 @@ void Lcompiler::fir_thread_firmap_bw(Lgraph *lg, Bitwidth &bw, std::vector<Lgrap
 
   fmt::print("---------------- Local Bitwidth-Inference ({}) ----------- (B-0)\n", new_lg->get_name());
   bw.do_trans(new_lg);
+  fmt::print("---------------- Local Bitwidth-Inference ({}) ----------- (B-1)\n", new_lg->get_name());
+  bw.do_trans(new_lg);
+  
   gviz ? gv.do_from_lgraph(new_lg, "") : void();
 
   mapped_lgs.emplace_back(new_lg);
@@ -232,7 +239,7 @@ void Lcompiler::do_firbits() {
     if (lg->get_name() == top_name_before_mapping) {
       hit = true;
 
-      lg->each_hier_unique_sub_bottom_up([this](Lgraph *lg_sub) {
+      lg->each_hier_unique_sub_bottom_up_parallel([this](Lgraph *lg_sub) {
         Firmap fm(fbmaps, pinmaps, spinmaps_xorr);
         fmt::print("visiting lgraph name:{}\n", lg_sub->get_name());
         fmt::print("---------------- Firrtl Bits Analysis ({}) --------------- (F-0)\n", lg_sub->get_name());

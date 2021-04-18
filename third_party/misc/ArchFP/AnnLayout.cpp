@@ -2,7 +2,10 @@
 
 #include <cmath>
 #include <functional>
-#include <random>
+
+#include "BagLayout.hpp"
+#include "GridLayout.hpp"
+#include "mathutil.hpp"
 
 annLayout::annLayout(unsigned int rsize) : FPContainer(rsize), horiz(rsize), vert(rsize) {
   type = Ntype_op::Invalid;
@@ -14,12 +17,8 @@ void annLayout::addComponent(FPObject* comp, int count) {
   FPContainer::addComponent(comp, count);
 }
 
-float annLayout::getSide(float area, float ar) { return sqrt(area / abs(ar)); }
-
 bool annLayout::layout(FPOptimization opt, double targetAR) {
   (void)opt;
-
-  // TODO: handle leaves with count > 1!
 
   // NOTE: paper says AR is h / w, but ArchFP says AR is w / h
   float area      = totalArea();
@@ -30,49 +29,55 @@ bool annLayout::layout(FPOptimization opt, double targetAR) {
     return true;
   }
 
-  std::default_random_engine gen;
+  int gcd = getComponent(0)->getCount();
+  for (size_t i = 1; i < getComponentCount(); i++) {
+    gcd = GCD(gcd, getComponent(i)->getCount());
+  }
 
-  FPObject*                             root = getComponent(0);
-  std::uniform_real_distribution<float> rootAR(root->getMinAR(), root->getMaxAR());
+  // if all child objects have a gcd of > 1, then each object can be split into two sub objects.
+  // this means we can make copies of the bagLayout and put it into a grid to save work.
 
+  bagLayout* bag = new bagLayout(getComponentCount());
+  for (size_t i = 0; i < getComponentCount(); i++) {
+    FPObject* item = getComponent(i);
+    bag->addComponent(item, item->getCount() / gcd);
+  }
+
+  FPContainer* initLayout = bag;
+  if (gcd > 1) {
+    gridLayout* grid = new gridLayout(1);
+    grid->addComponent(bag, gcd);
+    initLayout = grid;
+  }
+
+  bool correct = initLayout->layout(AspectRatio, targetAR);
+  if (!correct) {
+    return false;
+  }
+  
+  FPObject* root = nullptr;
+  for (size_t i = 0; i < getComponentCount(); i++) {
+	FPObject* comp = getComponent(i);
+	assert(comp->valid());
+	if (comp->getX() == 0 && comp->getY() == 0) {
+      fmt::print("root object: {}\n", comp->getName());
+	  root = comp;
+	  break;
+	}
+  }
+
+  assert(root);
   horiz.setRoot(*root);
 
-  // TODO: build vert tree!
+  //vert.setRoot(*root);
 
-  vert.setRoot(*root);
+  // TODO: construct horizontal B*-tree with a random (but legal) floorplan
+  // for each object: find the (bottom) object to the right of it, construct that
+  // if nothing to the right (or done), do leftmost node above it
 
-  // construct horizontal B*-tree with a random (but legal) floorplan
-  std::function<void(FPContainer*)> add_object = [&](FPContainer* obj) {
-    for (size_t i = 0; i < obj->getComponentCount(); i++) {
-      FPObject* c = obj->getComponent(i);
+  // TODO: set area?
 
-      if (c->getType() == Ntype_op::Sub || c->getType() == Ntype_op::Invalid) {
-        add_object((FPContainer*)c);
-      }
-
-      std::uniform_real_distribution<float> randAR(c->getMinAR(), c->getMaxAR());
-      std::uniform_int_distribution<size_t> randUpRight(0, 1);
-
-      bool repeat = false;
-      do {
-        // start with random (but legal) AR and adjust if required
-        float childWidth  = getSide(c->totalArea(), randAR(gen));
-        float childHeight = 1 / childWidth;
-
-        // NOTE:
-
-        // if we randomly alternate between left and right node allocations,
-        // then we have to rebuild the contour on every insertion.
-
-        // need a better approach.
-
-      } while (repeat);
-    }
-  };
-
-  add_object(this);
-
-  return false;
+  return true;
 }
 
 void annLayout::outputHotSpotLayout(std::ostream& o, double startX, double startY) {

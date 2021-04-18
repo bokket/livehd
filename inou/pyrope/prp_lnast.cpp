@@ -705,7 +705,7 @@ void Prp_lnast::eval_assignment_expression(mmap_lib::Tree_index idx_start_ast, m
   auto lhs_node = eval_rule(idx_lhs_ast, idx_start_ln);
   I(in_lhs);
   in_lhs = false;
-  if (!lhs_node.is_invalid()) {
+  if (!lhs_node.is_invalid() && lhs_node.token.get_text() != in_lhs_rhs_node.token.get_text()) {
     auto idx_assign = lnast->add_child(idx_nxt_ln, Lnast_node::create_assign());
     lnast->add_child(idx_assign, lhs_node);
     lnast->add_child(idx_assign, in_lhs_rhs_node);
@@ -1604,18 +1604,28 @@ Lnast_node Prp_lnast::eval_tuple_dot_notation(mmap_lib::Tree_index idx_start_ast
       is_attr = true;
     }
   }
+  if (select_fields.size()>1)
+    is_attr = false; // treat as tuple foo.bar.__attr = 3 or x = foo.bar.__attr
 
 #if 0
   idx_dot_root   = lnast->add_child(cur_stmts, Lnast_node::create_select());
 #else
   if (in_lhs && is_attr) {
-    idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_attr_set());
+    // idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_attr_set());
+    idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_tuple_add());
   } else if (!in_lhs && is_attr) {
-    idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_attr_get());
+    auto field = select_fields[0].token.get_text();
+    if (select_fields.size()==1 && (field=="__create_flop" || field=="__last_value")) {
+      idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_attr_get());
+    }else{
+      idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_tuple_get());
+    }
   } else if (in_lhs && !is_attr) {
     idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_tuple_add());
   } else if (!in_lhs && !is_attr) {
     idx_dot_root = lnast->add_child(cur_stmts, Lnast_node::create_tuple_get());
+  }else{
+    I(false);
   }
 #endif
 

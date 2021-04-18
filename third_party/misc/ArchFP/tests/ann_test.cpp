@@ -16,7 +16,17 @@ TEST_F(ann_test, basic_test) {
   chip->addComponentCluster("C2", 1, 4, 4., 1.);
   chip->addComponentCluster("C3", 1, 2, 4., 1.);
 
-  EXPECT_TRUE(false);
+  bool success = chip->layout(AspectRatio, 1.0);
+  EXPECT_TRUE(success);
+}
+
+TEST_F(ann_test, basic_test2) {
+  annLayout* chip = new annLayout(5);
+  chip->addComponentCluster("C1", 1, 3, 4., 1.);
+  chip->addComponentCluster("C2", 1, 4, 4., 1.);
+  chip->addComponentCluster("C3", 1, 2, 4., 1.);
+  chip->addComponentCluster("C4", 8, 1, 2., 1.);
+  chip->addComponentCluster("C5", 2, 2, 4., 1.);
 
   bool success = chip->layout(AspectRatio, 1.0);
   EXPECT_TRUE(success);
@@ -33,6 +43,7 @@ TEST_F(ann_test, bad_ar_test) {
   EXPECT_FALSE(success);
 }
 
+/*
 TEST_F(ann_test, sub_test) {
   annLayout* coreCluster = new annLayout(4);
   coreCluster->addComponentCluster("ICache", 5, 1, 10., 1.);
@@ -87,3 +98,4 @@ TEST_F(ann_test, archfp_test) {
   success = chip->layout(AspectRatio, 1.0);
   EXPECT_TRUE(success);
 }
+*/
